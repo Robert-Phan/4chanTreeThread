@@ -1,0 +1,14 @@
+{
+  "name": "thread-buffer-extension",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Firefox MV3 extension that inserts a reply buffer on example.com",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "watch": "tsc -p tsconfig.json --watch"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.315",
+    "typescript": "^5.8.2"
+  }
+}

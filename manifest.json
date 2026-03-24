@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Thread Buffer Inserter",
+  "version": "1.0.0",
+  "description": "Inserts a reply buffer right after the subject container.",
+  "page_action": {
+    "default_title": "Insert Buffer",
+    "show_matches": ["*://boards.4chan.org/*/thread/*"]
+  },
+  "background": {
+    "scripts": ["dist/background.js"]
+  },
+  "permissions": ["tabs"],
+  "host_permissions": ["*://boards.4chan.org/*/thread/*"],
+  "content_scripts": [
+    {
+      "matches": ["*://boards.4chan.org/*/thread/*"],
+      "js": ["dist/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "thread-buffer@example.local",
+      "strict_min_version": "109.0"
+    }
+  }
+}
