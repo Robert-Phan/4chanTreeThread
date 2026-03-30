@@ -23,9 +23,27 @@ type ReplyRecord = {
   linkedParentIds: string[];
 };
 
+// Tree node representing a reply in the thread hierarchy.
+// dupNumber tracks "true" copies created by a multi-parent reply.
+// Deep-copied descendants keep their original dupNumber values.
+type TreeNode = {
+  numericId: string;
+  replyRecord: ReplyRecord | null;
+  children: TreeNode[];
+  duplicate: boolean;
+  dupNumber: number;
+  instanceId: number;
+};
+
 let isTransformed = false;
 let originalThreadChildren: HTMLElement[] | null = null;
 let originalThreadParent: HTMLElement | null = null;
+let activeRootNode: TreeNode | null = null;
+let activeThreadParent: HTMLElement | null = null;
+let activeSubject: HTMLElement | null = null;
+let activeArrowClickHandler: ((event: MouseEvent) => void) | null = null;
+let nextNodeInstanceId = 1;
+const collapsedNodeInstanceIds = new Set<number>();
 
 // IDs are expected as pc{number}, e.g. pc123456.
 function parsePcNumericId(rawId: string | null): string | null {
@@ -118,6 +136,227 @@ function cloneReplyForDepth(replyElement: HTMLElement, depth: number): HTMLEleme
   return clone;
 }
 
+// Remove content for collapsed replies while keeping container, arrows and fileText.
+function collapseReplyElement(replyElement: HTMLElement): void {
+  const blockquote = replyElement.querySelector<HTMLElement>("blockquote.postMessage");
+  if (blockquote) {
+    blockquote.remove();
+  }
+
+  const fileElement = replyElement.querySelector<HTMLElement>(".file");
+  if (fileElement) {
+    for (const child of Array.from(fileElement.children)) {
+      if (child.classList.contains("fileText")) {
+        continue;
+      }
+
+      child.remove();
+    }
+  }
+}
+
+function clearActiveTreeState(): void {
+  collapsedNodeInstanceIds.clear();
+  if (activeArrowClickHandler && activeThreadParent) {
+    activeThreadParent.removeEventListener("click", activeArrowClickHandler);
+  }
+
+  activeRootNode = null;
+  activeThreadParent = null;
+  activeSubject = null;
+  nextNodeInstanceId = 1;
+  activeArrowClickHandler = null;
+}
+
+function renderActiveTree(autoCollapseDuplicates: boolean): void {
+  if (!activeRootNode || !activeThreadParent || !activeSubject) {
+    return;
+  }
+
+  const threadParent = activeThreadParent;
+  const subject = activeSubject;
+
+  clearThreadContainer(threadParent, subject);
+  const firstSeenDupNumberById = new Map<string, number>();
+
+  const renderNode = (node: TreeNode, depth: number): void => {
+    if (!node.replyRecord) {
+      return;
+    }
+
+    const firstSeen = firstSeenDupNumberById.get(node.numericId);
+    const isDuplicate = firstSeen !== undefined && firstSeen !== node.dupNumber;
+    node.duplicate = isDuplicate;
+
+    if (firstSeen === undefined) {
+      firstSeenDupNumberById.set(node.numericId, node.dupNumber);
+    }
+
+    if (autoCollapseDuplicates && node.duplicate) {
+      collapsedNodeInstanceIds.add(node.instanceId);
+    }
+
+    const isCollapsed = collapsedNodeInstanceIds.has(node.instanceId);
+    const element = node.replyRecord.element.cloneNode(true) as HTMLElement;
+    element.dataset.nodeInstanceId = String(node.instanceId);
+    setSideArrows(element, depth);
+
+    const sideArrows = element.querySelector<HTMLElement>(".sideArrows");
+    if (sideArrows) {
+      sideArrows.style.cursor = "pointer";
+    }
+
+    if (isCollapsed) {
+      collapseReplyElement(element);
+    }
+
+    threadParent.appendChild(element);
+
+    if (isCollapsed) {
+      return;
+    }
+
+    for (const child of node.children) {
+      renderNode(child, depth + 1);
+    }
+  };
+
+  for (const child of activeRootNode.children) {
+    renderNode(child, 1);
+  }
+}
+
+function attachArrowClickHandler(): void {
+  if (!activeThreadParent || !activeSubject) {
+    return;
+  }
+
+  if (activeArrowClickHandler) {
+    activeThreadParent.removeEventListener("click", activeArrowClickHandler);
+  }
+
+  activeArrowClickHandler = (event: MouseEvent) => {
+    const target = event.target as HTMLElement | null;
+    if (!target) {
+      return;
+    }
+
+    const sideArrows = target.closest(".sideArrows") as HTMLElement | null;
+    if (!sideArrows) {
+      return;
+    }
+
+    const replyElement = sideArrows.closest(".postContainer.replyContainer") as HTMLElement | null;
+    const instanceIdRaw = replyElement?.dataset.nodeInstanceId;
+    if (!instanceIdRaw) {
+      return;
+    }
+
+    const instanceId = Number(instanceIdRaw);
+    if (!Number.isFinite(instanceId)) {
+      return;
+    }
+
+    if (collapsedNodeInstanceIds.has(instanceId)) {
+      collapsedNodeInstanceIds.delete(instanceId);
+    } else {
+      collapsedNodeInstanceIds.add(instanceId);
+    }
+
+    renderActiveTree(false);
+  };
+
+  activeThreadParent.addEventListener("click", activeArrowClickHandler);
+}
+
+// Build tree structure from parent-child relationships.
+// Replies with multiple parents produce true copies (dupNumber 0..n-1).
+// Descendants are deep-copied per branch but preserve their own dupNumber.
+function buildTreeStructure(
+  subjectNumericId: string | null,
+  replyRecords: ReplyRecord[],
+  replyIdSet: Set<string>
+): { success: boolean; reason?: string; rootNode?: TreeNode } {
+  const subjectNodeId = subjectNumericId ?? "__subject_root__";
+  const parentsByChildId = new Map<string, string[]>();
+  const childrenByParentId = new Map<string, string[]>();
+  const replyByNumericId = new Map(replyRecords.map((record) => [record.numericId, record]));
+
+  // Build parent links and parent->children order from reply links.
+  // 1) valid linked parents if present
+  // 2) otherwise subject root
+  for (const record of replyRecords) {
+    const validParents = record.linkedParentIds.filter(
+      (linkedId) => linkedId === subjectNumericId || replyIdSet.has(linkedId)
+    );
+
+    const parentIds = (validParents.length > 0 ? validParents : [subjectNodeId]).map((parentId) =>
+      parentId === subjectNumericId ? subjectNodeId : parentId
+    );
+
+    parentsByChildId.set(record.numericId, parentIds);
+
+    for (const parentId of parentIds) {
+      const existing = childrenByParentId.get(parentId) ?? [];
+      existing.push(record.numericId);
+      childrenByParentId.set(parentId, existing);
+    }
+  }
+
+  // Build one node instance with the provided true-copy dupNumber.
+  function buildNodeInstance(numericId: string, dupNumber: number): TreeNode | null {
+    const replyRecord = replyByNumericId.get(numericId);
+    if (!replyRecord) {
+      return null;
+    }
+
+    const children: TreeNode[] = [];
+    const childIds = childrenByParentId.get(numericId) ?? [];
+
+    for (const childId of childIds) {
+      const parentChoices = parentsByChildId.get(childId) ?? [subjectNodeId];
+      const childDupNumber = Math.max(0, parentChoices.indexOf(numericId));
+      const childNode = buildNodeInstance(childId, childDupNumber);
+      if (childNode) {
+        children.push(childNode);
+      }
+    }
+
+    return {
+      numericId,
+      replyRecord,
+      children,
+      duplicate: false,
+      dupNumber,
+      instanceId: nextNodeInstanceId++,
+    };
+  }
+
+  // Build virtual root node and its children in original order.
+  const rootChildren: TreeNode[] = [];
+  const rootChildIds = childrenByParentId.get(subjectNodeId) ?? [];
+
+  for (const childId of rootChildIds) {
+    const parentChoices = parentsByChildId.get(childId) ?? [subjectNodeId];
+    const childDupNumber = Math.max(0, parentChoices.indexOf(subjectNodeId));
+    const childNode = buildNodeInstance(childId, childDupNumber);
+    if (childNode) {
+      rootChildren.push(childNode);
+    }
+  }
+
+  const rootNode: TreeNode = {
+    numericId: subjectNodeId,
+    replyRecord: null,
+    children: rootChildren,
+    duplicate: false,
+    dupNumber: 0,
+    instanceId: 0,
+  };
+
+  return { success: true, rootNode };
+}
+
 // Keep a full snapshot of current thread children so we can restore on the next click.
 function snapshotThreadChildren(parent: HTMLElement): HTMLElement[] {
   return Array.from(parent.children).map((child) => child.cloneNode(true) as HTMLElement);
@@ -152,7 +391,7 @@ function insertOrUpdateBuffer(subject: HTMLElement, firstReply: HTMLElement, thu
   return bufferHeight;
 }
 
-// Build parent->children relationships, then DFS-reinsert replies in source order.
+// Build and render tree structure from reply records, detecting and marking duplicate node instances.
 function reconstructReplyTree(subject: HTMLElement, replies: HTMLElement[]): { success: boolean; reason?: string } {
   const subjectNumericId = parsePcNumericId(subject.id);
   const replyRecords = buildReplyRecords(replies);
@@ -162,26 +401,10 @@ function reconstructReplyTree(subject: HTMLElement, replies: HTMLElement[]): { s
     return { success: false, reason: "No valid reply records to build tree from." };
   }
 
-  const subjectNodeId = subjectNumericId ?? "__subject_root__";
-  const childrenByParent = new Map<string, string[]>();
-  const replyByNumericId = new Map(replyRecords.map((record) => [record.numericId, record]));
-
-  // Parent selection rule:
-  // 1) valid linked parents if present
-  // 2) otherwise subject root
-  for (const record of replyRecords) {
-    const validParents = record.linkedParentIds.filter(
-      (linkedId) => linkedId === subjectNumericId || replyIdSet.has(linkedId)
-    );
-
-    const parentIds = validParents.length > 0 ? validParents : [subjectNodeId];
-
-    for (const parentId of parentIds) {
-      const normalizedParent = parentId === subjectNumericId ? subjectNodeId : parentId;
-      const existing = childrenByParent.get(normalizedParent) ?? [];
-      existing.push(record.numericId);
-      childrenByParent.set(normalizedParent, existing);
-    }
+  // Build actual tree structure from reply records.
+  const treeResult = buildTreeStructure(subjectNumericId, replyRecords, replyIdSet);
+  if (!treeResult.success || !treeResult.rootNode) {
+    return { success: false, reason: treeResult.reason };
   }
 
   const threadParent = subject.parentElement;
@@ -191,40 +414,15 @@ function reconstructReplyTree(subject: HTMLElement, replies: HTMLElement[]): { s
 
   clearThreadContainer(threadParent, subject);
 
-  // Replies linked by multiple parents can appear multiple times; clone after first insertion.
-  const seenInsertions = new Map<string, number>();
+  activeRootNode = treeResult.rootNode;
+  activeThreadParent = threadParent;
+  activeSubject = subject;
 
-  // Guard with an ancestor set to avoid infinite recursion on cyclic links.
-  const insertSubtree = (parentId: string, depth: number, ancestors: Set<string>): void => {
-    const children = childrenByParent.get(parentId) ?? [];
+  attachArrowClickHandler();
 
-    for (const childId of children) {
-      if (ancestors.has(childId)) {
-        continue;
-      }
+  // Render replies from tree and auto-collapse duplicates instead of tagging text.
+  renderActiveTree(true);
 
-      const replyRecord = replyByNumericId.get(childId);
-      if (!replyRecord) {
-        continue;
-      }
-
-      const count = seenInsertions.get(childId) ?? 0;
-      const nodeToInsert = count === 0 ? replyRecord.element : cloneReplyForDepth(replyRecord.element, depth);
-
-      if (count === 0) {
-        setSideArrows(nodeToInsert, depth);
-      }
-
-      seenInsertions.set(childId, count + 1);
-      threadParent.appendChild(nodeToInsert);
-
-      const nextAncestors = new Set(ancestors);
-      nextAncestors.add(childId);
-      insertSubtree(childId, depth + 1, nextAncestors);
-    }
-  };
-
-  insertSubtree(subjectNodeId, 1, new Set());
   return { success: true };
 }
 
@@ -237,6 +435,7 @@ function processThread(): OperationResult {
     }
 
     restoreThreadFromSnapshot(originalThreadParent, originalThreadChildren);
+    clearActiveTreeState();
     isTransformed = false;
     originalThreadChildren = null;
     originalThreadParent = null;
@@ -284,6 +483,7 @@ function processThread(): OperationResult {
     }
     originalThreadChildren = null;
     originalThreadParent = null;
+    clearActiveTreeState();
 
     return {
       success: false,
