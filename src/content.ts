@@ -112,7 +112,7 @@ function setSideArrows(replyElement: HTMLElement, depth: number): void {
     return;
   }
 
-  sideArrows.textContent = ">>" + "•>>".repeat(depth-1);
+  sideArrows.textContent = ">>" + "│>>".repeat(depth-1);
 }
 
 // Keep only the subject and optional buffer node; everything else gets rebuilt from the tree.

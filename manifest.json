@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Thread Buffer Inserter",
-  "version": "1.0.0",
-  "description": "Inserts a reply buffer right after the subject container.",
+  "name": "Tree-Style 4chan Threads",
+  "version": "0.0.1",
+  "description": "Turns a 4chan thread into a tree format.",
   "page_action": {
-    "default_title": "Insert Buffer",
+    "default_title": "Turn into Tree",
     "show_matches": ["*://boards.4chan.org/*/thread/*"]
   },
   "background": {
@@ -21,8 +21,11 @@
   ],
   "browser_specific_settings": {
     "gecko": {
-      "id": "thread-buffer@example.local",
-      "strict_min_version": "109.0"
+      "id": "4chantree@example.local",
+      "strict_min_version": "109.0",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
     }
   }
 }
